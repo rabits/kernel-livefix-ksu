@@ -1,7 +1,7 @@
 id=kernel_livefix
 name=Kernel Livefix
-version=v0.1.1
-versionCode=2
+version=v0.1.2
+versionCode=3
 author=Rabit (@rabits)
 description=Runtime kernel branch patches (Honor STP / livefix). Auto-load after GhostLock; WebUI for patch autostart and broken flags.
 webuiIcon=webroot/icon.svg

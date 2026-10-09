@@ -4,6 +4,8 @@ Kernel live patch engine to modify kernel functionality right on the fly.
 
 Installs **`livefix.ko`** module, which you can `rmmod` while hooks with `persist=1` stay in kernel text until reboot.
 
+![Screenshot WebUI](docs/screenshot.jpg)
+
 ## Build zip
 
 ```bash

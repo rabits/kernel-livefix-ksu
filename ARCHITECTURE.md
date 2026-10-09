@@ -84,6 +84,8 @@ Without persist, `rmmod` restores the saved hint at each site.
 
 - **CFI**: only direct `B` to the gate is used; indirect calls through patched functions are unchanged.
 - **Duplicate apply**: applying the same symbol again patches already-branched code and can break; userspace tracks `state/applied.list` and skips re-apply unless `--force`.
+- **Shared `ret0` gate**: every `HOOK=ret0` symbol branches to the same `livefix_gate_ret0`; the stolen hint at the gate is overwritten on each new `ret0` apply. Prefer one broad symbol (e.g. `rscan_dynamic_raw_unlock`) or apply multiple `ret0` patches only when prologues match.
+- **Partial rscan stubs**: hooking only `kcode_syscall_scan` while `kcode_scan` / `sescan_hookhash` / … still run can correlate with rare panics in `rscan` — see `docs/CRASH_20261010.md`.
 - **Wrong symbol / OTA kernel**: KMI-mismatched `livefix.ko` fails `insmod` (vermagic); wrong symbol name fails apply with log line.
 
 ## Userspace control

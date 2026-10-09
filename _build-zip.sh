@@ -32,7 +32,7 @@ copy "$ROOT/service.sh" service.sh
 copy "$ROOT/autostart.sh" autostart.sh
 copy "$ROOT/action.sh" action.sh
 copy "$ROOT/customize.sh" customize.sh
-copy "$ROOT/patches/src/README.md" patches/README.md
+copy "$ROOT/patches/README.md" patches/README.md
 copy "$ROOT/scripts/probes/lib/honor_stp.sh" scripts/probes/lib/honor_stp.sh
 copy "$ROOT/README.md" README.md
 copy "$ROOT/scripts/common.sh" scripts/common.sh
