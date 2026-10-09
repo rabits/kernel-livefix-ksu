@@ -1,0 +1,6 @@
+{
+  "title": "Kernel Livefix",
+  "icon": "icon.svg",
+  "windowResize": "auto",
+  "exitConfirm": false
+}

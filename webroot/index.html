@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kernel Livefix</title>
+  <style>
+    :root { color-scheme: dark; --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b98a5; --accent: #3d8bfd; --ok: #3dd68c; --bad: #f87171; --warn: #ffb020; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 16px; padding-bottom: 72px; }
+    h1 { font-size: 1.2rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); font-size: 0.8rem; margin-bottom: 14px; }
+    .card { background: var(--card); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+    .row { display: flex; justify-content: space-between; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid #2a3544; gap: 8px; }
+    .row:last-child { border-bottom: none; }
+    .hint { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
+    .ok { color: var(--ok); font-size: 0.75rem; }
+    .bad { color: var(--bad); font-size: 0.75rem; }
+    pre { font-size: 0.7rem; background: #0b1018; padding: 10px; border-radius: 8px; max-height: 220px; overflow: auto; }
+    button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 14px; margin: 4px 6px 0 0; font-size: 0.9rem; transition: opacity 0.15s, transform 0.1s; }
+    button:active:not(:disabled) { transform: scale(0.97); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.sec { background: #2a3544; }
+    button.warn { background: #5c4a1a; color: var(--warn); }
+    button.busy { opacity: 0.7; }
+    input[type=checkbox] { width: 22px; height: 22px; margin-top: 4px; flex-shrink: 0; }
+    .toast { position: fixed; bottom: 16px; left: 16px; right: 16px; max-width: 420px; margin: 0 auto; padding: 12px 14px; border-radius: 10px; font-size: 0.85rem; z-index: 99; box-shadow: 0 8px 24px rgba(0,0,0,0.45); display: none; }
+    .toast.show { display: block; animation: fadeIn 0.2s ease; }
+    .toast.ok { background: #1a3d2e; border: 1px solid var(--ok); }
+    .toast.err { background: #3d1a1a; border: 1px solid var(--bad); }
+    .toast.info { background: #243044; border: 1px solid var(--accent); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    .row-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+    .btn-sm { padding: 5px 10px; font-size: 0.75rem; margin: 0; }
+  </style>
+</head>
+<body>
+  <h1>Kernel Livefix</h1>
+  <p class="sub">Autostart is stored in <code>state/autostart.conf</code> (seeded from patch probes on first run).</p>
+
+  <div class="card" id="patchList"><p class="hint">Loading patches…</p></div>
+
+  <div class="card">
+    <button id="btnSave">Save autostart</button>
+    <button class="sec" id="btnApply">Apply autostart now</button>
+    <button class="sec" id="btnStatus">Refresh status</button>
+  </div>
+
+  <div class="card"><pre id="out">…</pre></div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script>
+    const MOD = '/data/adb/modules/kernel_livefix';
+    const CONF = MOD + '/state/autostart.conf';
+    const CTL = MOD + '/scripts/livefix-ctl.sh';
+    let toastTimer;
+
+    function toast(msg, kind = 'info') {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'toast show ' + kind;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.className = 'toast'; }, 3500);
+    }
+
+    function setBusy(btn, on, label) {
+      if (!btn) return;
+      if (on) {
+        btn.dataset.prev = btn.textContent;
+        btn.textContent = label || '…';
+        btn.disabled = true;
+        btn.classList.add('busy');
+      } else {
+        btn.textContent = btn.dataset.prev || btn.textContent;
+        btn.disabled = false;
+        btn.classList.remove('busy');
+      }
+    }
+
+    function exec(cmd) {
+      return new Promise((resolve) => {
+        if (typeof ksu === 'undefined') {
+          resolve({ errno: 0, stdout: '[dev] ' + cmd });
+          return;
+        }
+        const cb = 'cb_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+        window[cb] = (errno, stdout, stderr) => {
+          resolve({ errno, stdout, stderr });
+          delete window[cb];
+        };
+        try { ksu.exec(cmd, '{}', cb); } catch (e) {
+          resolve({ errno: 1, stdout: '', stderr: String(e) });
+          delete window[cb];
+        }
+      });
+    }
+
+    function parseConf(text) {
+      const m = {};
+      (text || '').split('\n').forEach(line => {
+        const t = line.trim();
+        if (!t || t.startsWith('#')) return;
+        const i = t.indexOf('=');
+        if (i > 0) m[t.slice(0, i)] = t.slice(i + 1);
+      });
+      return m;
+    }
+
+    async function loadUi() {
+      const prof = (await exec('sh ' + CTL + ' detect 2>/dev/null')).stdout.trim();
+      const indexPath = prof ? MOD + '/prebuilt/' + prof + '/patches/index.json' : '';
+      let index = { patches: [] };
+      if (indexPath) {
+        const ix = await exec('cat ' + indexPath + ' 2>/dev/null');
+        try { index = JSON.parse(ix.stdout || '{}'); } catch (e) {}
+      }
+      const meta = {};
+      (index.patches || []).forEach(p => { meta[p.id] = p; });
+
+      const r = await exec(
+        'cat ' + CONF + ' 2>/dev/null; echo ---BROKEN---; cat ' + MOD + '/state/broken.list 2>/dev/null; echo ---APPLIED---; cat ' + MOD + '/state/applied.list 2>/dev/null; echo ---LF---; ls ' + MOD + '/prebuilt/*/patches/*.lfpatch 2>/dev/null'
+      );
+      const parts = (r.stdout || '').split('---BROKEN---');
+      const conf = parseConf(parts[0]);
+      const rest = (parts[1] || '').split('---APPLIED---');
+      const broken = new Set((rest[0] || '').trim().split(/\s+/).filter(Boolean));
+      const applied = new Set((rest[1] || '').split('---LF---')[0].trim().split(/\s+/).filter(Boolean));
+      const lf = (rest[1] || '').split('---LF---')[1] || '';
+
+      const ids = new Set(Object.keys(conf));
+      lf.split('\n').forEach(line => {
+        const m = line.match(/\/([^/]+)\.lfpatch$/);
+        if (m) ids.add(m[1]);
+      });
+      (index.patches || []).forEach(p => ids.add(p.id));
+
+      const sorted = [...ids].sort();
+      document.getElementById('patchList').innerHTML = sorted.map(id => {
+        const p = meta[id] || {};
+        const title = p.title || id;
+        const desc = p.description || '';
+        let status = '';
+        if (broken.has(id)) status = '<div class="bad">failed last run — use Retry</div>';
+        else if (applied.has(id)) status = '<div class="ok">applied this session</div>';
+        const retryBtn = broken.has(id)
+          ? `<button type="button" class="sec btn-sm retry-btn" data-id="${id}">Retry</button>` : '';
+        return `<div class="row" data-patch-id="${id}">
+          <div style="flex:1">
+            <strong>${title}</strong>
+            <div class="hint"><code>${id}</code>${desc ? ' — ' + desc : ''}</div>
+            ${status}
+          </div>
+          <div class="row-actions">
+            ${retryBtn}
+            <input type="checkbox" data-id="${id}" ${conf[id] === '1' ? 'checked' : ''} aria-label="autostart ${id}" />
+          </div>
+        </div>`;
+      }).join('') || '<p class="hint">No patches found</p>';
+
+      document.querySelectorAll('.retry-btn').forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.id;
+          setBusy(btn, true, '…');
+          toast('Retrying ' + id + '…', 'info');
+          const r = await exec('sh ' + CTL + ' apply ' + id + ' --force 2>&1');
+          if (r.errno === 0) toast(id + ' applied', 'ok');
+          else toast('Retry failed: ' + (r.stderr || r.stdout || 'errno ' + r.errno).slice(0, 120), 'err');
+          setBusy(btn, false);
+          await loadUi();
+          await refresh();
+        };
+      });
+    }
+
+    async function saveAutostart() {
+      const btn = document.getElementById('btnSave');
+      setBusy(btn, true, 'Saving…');
+      toast('Saving autostart…', 'info');
+      for (const b of document.querySelectorAll('input[data-id]')) {
+        const id = b.dataset.id;
+        const v = b.checked ? '1' : '0';
+        await exec('sh ' + CTL + ' set-autostart ' + id + ' ' + v);
+        if (b.checked) await exec('sh ' + CTL + ' clear-broken ' + id);
+      }
+      setBusy(btn, false);
+      toast('Autostart saved', 'ok');
+      await loadUi();
+    }
+
+    async function refresh() {
+      const btn = document.getElementById('btnStatus');
+      setBusy(btn, true, '…');
+      const r = await exec('sh ' + CTL + ' status 2>&1');
+      document.getElementById('out').textContent = (r.stdout || r.stderr || '').trim();
+      setBusy(btn, false);
+    }
+
+    document.getElementById('btnSave').onclick = saveAutostart;
+    document.getElementById('btnApply').onclick = async () => {
+      const btn = document.getElementById('btnApply');
+      setBusy(btn, true, 'Applying…');
+      toast('Running service (bootstrap + apply)…', 'info');
+      const r = await exec('sh ' + MOD + '/service.sh 2>&1');
+      if (r.errno === 0) toast('Apply finished — check status', 'ok');
+      else toast('Apply may have failed — see status', 'err');
+      setBusy(btn, false);
+      await loadUi();
+      await refresh();
+    };
+    document.getElementById('btnStatus').onclick = async () => {
+      toast('Refreshing…', 'info');
+      await refresh();
+      await loadUi();
+      toast('Status updated', 'ok');
+    };
+
+    (async () => {
+      await exec('sh ' + CTL + ' bootstrap-autostart 2>/dev/null');
+      await loadUi();
+      await refresh();
+    })();
+  </script>
+</body>
+</html>
