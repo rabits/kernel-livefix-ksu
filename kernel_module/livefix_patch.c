@@ -16,10 +16,18 @@
 #define HINT_VAL 0xd503201fu
 #define MAX_PATCHES 32
 #define GATE_BLOB_MAX 64
+#define GATE_SLOT_BYTES 16
+#define GATE_SLOT_INSNS (GATE_SLOT_BYTES / 4)
+
+#define INSN_PACIASP 0xd503233fu
+#define INSN_AUTIASP 0xd50323bfu
+#define INSN_MOV_W0_0 0x52800000u
+#define INSN_RET 0xd65f03c0u
 
 extern void livefix_gate(void);
 extern void livefix_gate_ret0(void);
 extern void livefix_gate_ret(void);
+extern char livefix_gates_pool[];
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 typedef int (*patch_text_t)(void *addrs[], u32 insns[], int cnt);
@@ -91,23 +99,77 @@ static bool insn_is_hint(u32 insn)
 	return (insn & HINT_MASK) == HINT_VAL;
 }
 
-static unsigned long gate_for_hook(enum livefix_hook hook)
+static int build_gate_insns(enum livefix_hook hook, u32 stolen, u32 *out, int *n_out)
 {
+	int n = 0;
+
+	out[n++] = stolen;
 	switch (hook) {
 	case LIVEFIX_HOOK_RET0:
-		return (unsigned long)livefix_gate_ret0;
+		out[n++] = INSN_MOV_W0_0;
+		break;
 	case LIVEFIX_HOOK_RET:
-		return (unsigned long)livefix_gate_ret;
-	case LIVEFIX_HOOK_TRANSPARENT:
-		return (unsigned long)livefix_gate;
-	case LIVEFIX_HOOK_GATE_BLOB:
-		return gate_blob_addr;
+		break;
 	default:
-		return 0;
+		return -EINVAL;
 	}
+	if (stolen == INSN_PACIASP)
+		out[n++] = INSN_AUTIASP;
+	out[n++] = INSN_RET;
+	if (n > GATE_SLOT_INSNS)
+		return -EINVAL;
+	*n_out = n;
+	return 0;
 }
 
-static int install_branch_hook(unsigned long addr, unsigned long gate)
+static unsigned long gate_slot_addr(int slot)
+{
+	return (unsigned long)(livefix_gates_pool + slot * GATE_SLOT_BYTES);
+}
+
+static int install_branch_hook(unsigned long addr, enum livefix_hook hook)
+{
+	u32 stolen, branch, seq[GATE_SLOT_INSNS];
+	unsigned long gate;
+	int i, n, ret;
+
+	if (patch_count >= MAX_PATCHES)
+		return -ENOMEM;
+
+	stolen = *(volatile u32 *)addr;
+	if (!insn_is_hint(stolen)) {
+		pr_err("%lx insn %08x not a hint\n", addr, stolen);
+		return -EINVAL;
+	}
+
+	ret = build_gate_insns(hook, stolen, seq, &n);
+	if (ret)
+		return ret;
+
+	gate = gate_slot_addr(patch_count);
+	ret = encode_b(addr, gate, &branch);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < n; i++) {
+		ret = write_insn((void *)(gate + i * 4), seq[i]);
+		if (ret)
+			return ret;
+	}
+
+	ret = write_insn((void *)addr, branch);
+	if (ret)
+		return ret;
+
+	patches[patch_count].addr = addr;
+	patches[patch_count].orig = stolen;
+	patches[patch_count].active = true;
+	patch_count++;
+	pr_info("hook %lx -> gate slot %d (%d insns)\n", addr, patch_count - 1, n);
+	return 0;
+}
+
+static int install_branch_hook_blob(unsigned long addr, unsigned long gate)
 {
 	u32 stolen, branch;
 	int ret;
@@ -195,13 +257,24 @@ static int apply_one_symbol(const char *name, enum livefix_hook hook)
 		return install_transparent(addr);
 	}
 
-	gate = gate_for_hook(hook);
-	if (!gate)
-		return -EINVAL;
-	ret = encode_b(addr, gate, &dummy);
-	if (ret)
-		return ret;
-	return install_branch_hook(addr, gate);
+	if (hook == LIVEFIX_HOOK_RET0 || hook == LIVEFIX_HOOK_RET) {
+		ret = encode_b(addr, gate_slot_addr(patch_count), &dummy);
+		if (ret)
+			return ret;
+		return install_branch_hook(addr, hook);
+	}
+
+	if (hook == LIVEFIX_HOOK_GATE_BLOB) {
+		gate = gate_blob_addr;
+		if (!gate)
+			return -EINVAL;
+		ret = encode_b(addr, gate, &dummy);
+		if (ret)
+			return ret;
+		return install_branch_hook_blob(addr, gate);
+	}
+
+	return -EINVAL;
 }
 
 static int apply_symbol_list(const char *syms, enum livefix_hook hook)

@@ -15,6 +15,7 @@
     .hint { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
     .ok { color: var(--ok); font-size: 0.75rem; }
     .bad { color: var(--bad); font-size: 0.75rem; }
+    .warn { color: var(--warn); font-size: 0.75rem; }
     pre { font-size: 0.7rem; background: #0b1018; padding: 10px; border-radius: 8px; max-height: 220px; overflow: auto; }
     button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 14px; margin: 4px 6px 0 0; font-size: 0.9rem; transition: opacity 0.15s, transform 0.1s; }
     button:active:not(:disabled) { transform: scale(0.97); }
@@ -31,11 +32,22 @@
     @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
     .row-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
     .btn-sm { padding: 5px 10px; font-size: 0.75rem; margin: 0; }
+    .engine-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+    #engineState { font-size: 0.85rem; }
   </style>
 </head>
 <body>
   <h1>Kernel Livefix</h1>
-  <p class="sub">Autostart is stored in <code>state/autostart.conf</code> (seeded from patch probes on first run).</p>
+  <p class="sub">Applied patches are tracked per boot (<code>session.boot_id</code>). Autostart: <code>state/autostart.conf</code>.</p>
+
+  <div class="card">
+    <div class="engine-bar">
+      <span id="engineState">Engine: …</span>
+      <button type="button" class="sec btn-sm" id="btnLoadEngine">Load livefix.ko</button>
+      <button type="button" class="warn btn-sm" id="btnUnloadEngine">Unload module</button>
+    </div>
+    <p class="hint">Unload removes the control device; <strong>persist=1</strong> hooks stay in kernel text until reboot.</p>
+  </div>
 
   <div class="card" id="patchList"><p class="hint">Loading patches…</p></div>
 
@@ -53,6 +65,8 @@
     const CONF = MOD + '/state/autostart.conf';
     const CTL = MOD + '/scripts/livefix-ctl.sh';
     let toastTimer;
+    let engineLoaded = false;
+    let enginePatches = 0;
 
     function toast(msg, kind = 'info') {
       const el = document.getElementById('toast');
@@ -105,7 +119,29 @@
       return m;
     }
 
+    function parseStatus(text) {
+      const m = {};
+      (text || '').split('\n').forEach(line => {
+        const i = line.indexOf('=');
+        if (i > 0) m[line.slice(0, i)] = line.slice(i + 1);
+      });
+      return m;
+    }
+
+    async function refreshEngineFromStatus() {
+      const r = await exec('sh ' + CTL + ' status 2>&1');
+      const st = parseStatus(r.stdout || '');
+      engineLoaded = st.livefix_loaded === '1';
+      enginePatches = parseInt(st.engine_patches || '0', 10) || 0;
+      const el = document.getElementById('engineState');
+      el.innerHTML = engineLoaded
+        ? `<span class="ok">livefix loaded</span> · patches in engine: ${enginePatches}`
+        : '<span class="warn">livefix not loaded</span>';
+      document.getElementById('out').textContent = (r.stdout || r.stderr || '').trim();
+    }
+
     async function loadUi() {
+      await refreshEngineFromStatus();
       const prof = (await exec('sh ' + CTL + ' detect 2>/dev/null')).stdout.trim();
       const indexPath = prof ? MOD + '/prebuilt/' + prof + '/patches/index.json' : '';
       let index = { patches: [] };
@@ -139,10 +175,12 @@
         const title = p.title || id;
         const desc = p.description || '';
         let status = '';
-        if (broken.has(id)) status = '<div class="bad">failed last run — use Retry</div>';
-        else if (applied.has(id)) status = '<div class="ok">applied this session</div>';
-        const retryBtn = broken.has(id)
-          ? `<button type="button" class="sec btn-sm retry-btn" data-id="${id}">Retry</button>` : '';
+        if (broken.has(id)) status = '<div class="bad">failed last run</div>';
+        else if (applied.has(id) && engineLoaded && enginePatches > 0) {
+          status = '<div class="ok">applied this boot</div>';
+        } else if (applied.has(id)) {
+          status = '<div class="warn">marked applied — engine empty, tap Apply</div>';
+        }
         return `<div class="row" data-patch-id="${id}">
           <div style="flex:1">
             <strong>${title}</strong>
@@ -150,23 +188,31 @@
             ${status}
           </div>
           <div class="row-actions">
-            ${retryBtn}
+            <button type="button" class="sec btn-sm patch-apply" data-id="${id}">Apply</button>
+            <button type="button" class="warn btn-sm patch-unapply" data-id="${id}">Clear state</button>
             <input type="checkbox" data-id="${id}" ${conf[id] === '1' ? 'checked' : ''} aria-label="autostart ${id}" />
           </div>
         </div>`;
       }).join('') || '<p class="hint">No patches found</p>';
 
-      document.querySelectorAll('.retry-btn').forEach(btn => {
+      document.querySelectorAll('.patch-apply').forEach(btn => {
         btn.onclick = async () => {
           const id = btn.dataset.id;
           setBusy(btn, true, '…');
-          toast('Retrying ' + id + '…', 'info');
+          toast('Applying ' + id + '…', 'info');
           const r = await exec('sh ' + CTL + ' apply ' + id + ' --force 2>&1');
           if (r.errno === 0) toast(id + ' applied', 'ok');
-          else toast('Retry failed: ' + (r.stderr || r.stdout || 'errno ' + r.errno).slice(0, 120), 'err');
+          else toast((r.stderr || r.stdout || 'failed').slice(0, 120), 'err');
           setBusy(btn, false);
           await loadUi();
-          await refresh();
+        };
+      });
+      document.querySelectorAll('.patch-unapply').forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.id;
+          await exec('sh ' + CTL + ' unapply ' + id + ' 2>&1');
+          toast(id + ': cleared applied flag (hooks until reboot)', 'info');
+          await loadUi();
         };
       });
     }
@@ -174,7 +220,6 @@
     async function saveAutostart() {
       const btn = document.getElementById('btnSave');
       setBusy(btn, true, 'Saving…');
-      toast('Saving autostart…', 'info');
       for (const b of document.querySelectorAll('input[data-id]')) {
         const id = b.dataset.id;
         const v = b.checked ? '1' : '0';
@@ -186,37 +231,41 @@
       await loadUi();
     }
 
-    async function refresh() {
-      const btn = document.getElementById('btnStatus');
+    document.getElementById('btnLoadEngine').onclick = async () => {
+      const btn = document.getElementById('btnLoadEngine');
       setBusy(btn, true, '…');
-      const r = await exec('sh ' + CTL + ' status 2>&1');
-      document.getElementById('out').textContent = (r.stdout || r.stderr || '').trim();
+      const r = await exec('sh ' + CTL + ' load-engine 2>&1');
+      toast(r.errno === 0 ? 'livefix.ko loaded' : (r.stderr || r.stdout || 'load failed').slice(0, 100), r.errno === 0 ? 'ok' : 'err');
       setBusy(btn, false);
-    }
+      await loadUi();
+    };
+
+    document.getElementById('btnUnloadEngine').onclick = async () => {
+      const btn = document.getElementById('btnUnloadEngine');
+      setBusy(btn, true, '…');
+      const r = await exec('sh ' + CTL + ' unload-engine 2>&1');
+      toast('Module unloaded — re-apply patches after reload', 'info');
+      setBusy(btn, false);
+      await loadUi();
+    };
 
     document.getElementById('btnSave').onclick = saveAutostart;
     document.getElementById('btnApply').onclick = async () => {
       const btn = document.getElementById('btnApply');
       setBusy(btn, true, 'Applying…');
-      toast('Running service (bootstrap + apply)…', 'info');
       const r = await exec('sh ' + MOD + '/service.sh 2>&1');
-      if (r.errno === 0) toast('Apply finished — check status', 'ok');
-      else toast('Apply may have failed — see status', 'err');
+      toast(r.errno === 0 ? 'Autostart apply done' : 'Check livefix.log', r.errno === 0 ? 'ok' : 'err');
       setBusy(btn, false);
       await loadUi();
-      await refresh();
     };
     document.getElementById('btnStatus').onclick = async () => {
       toast('Refreshing…', 'info');
-      await refresh();
       await loadUi();
-      toast('Status updated', 'ok');
     };
 
     (async () => {
       await exec('sh ' + CTL + ' bootstrap-autostart 2>/dev/null');
       await loadUi();
-      await refresh();
     })();
   </script>
 </body>

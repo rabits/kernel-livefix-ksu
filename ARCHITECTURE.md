@@ -61,15 +61,13 @@ Patching goes through the kernel’s official path:
 3. **Check** a direct **`B`** branch from the target to a **gate** in the module fits ±128 MiB (module load window on this GKI).
 4. **`aarch64_insn_patch_text`** writes:
    - At the **target**: `B <gate>` (replaces the hint).
-   - At the **gate**: stolen hint, then hook-specific instructions.
-
-Built-in gates (`livefix_gate_ret0.S`, `livefix_gate_ret.S`, `livefix_gate.S`):
+   - At a **per-hook gate slot** in `livefix_gates_pool` (.text): stolen hint, hook body, optional **`autiasp`** (when stolen is `paciasp`), then `ret`.
 
 | Hook (UAPI / `patch.env`) | Gate behavior                                                         |
 |---------------------------|-----------------------------------------------------------------------|
-| `ret0`                    | Stolen hint → `mov w0, #0` → `ret` (scanner thinks success / no hit)  |
-| `ret`                     | Stolen hint → `ret` (void functions, e.g. `kernel_stp_upload`)        |
-| `transparent`             | Stolen hint → `B` back to `target+4` (smoke test; behavior unchanged) |
+| `ret0`                    | Stolen hint → `mov w0, #0` → `autiasp` (if paciasp) → `ret`           |
+| `ret`                     | Stolen hint → `autiasp` (if paciasp) → `ret`                          |
+| `transparent`             | Stolen hint → `B` back to `target+4` (via `livefix_gate.S`)           |
 | `gate` (blob)             | Custom `.text` from optional `gate.S` in patch source                 |
 
 Up to **32** patch sites are tracked (`patch_slot`: address + original first instruction).
@@ -84,8 +82,8 @@ Without persist, `rmmod` restores the saved hint at each site.
 
 - **CFI**: only direct `B` to the gate is used; indirect calls through patched functions are unchanged.
 - **Duplicate apply**: applying the same symbol again patches already-branched code and can break; userspace tracks `state/applied.list` and skips re-apply unless `--force`.
-- **Shared `ret0` gate**: every `HOOK=ret0` symbol branches to the same `livefix_gate_ret0`; the stolen hint at the gate is overwritten on each new `ret0` apply. Prefer one broad symbol (e.g. `rscan_dynamic_raw_unlock`) or apply multiple `ret0` patches only when prologues match.
-- **Partial rscan stubs**: hooking only `kcode_syscall_scan` while `kcode_scan` / `sescan_hookhash` / … still run can correlate with rare panics in `rscan` — see `docs/CRASH_20261010.md`.
+- **Boot session**: `state/applied.list` is cleared when `/proc/sys/kernel/random/boot_id` changes (`sync-session` / `service.sh`). Hooks do not survive reboot.
+- **Partial rscan stubs**: prefer fixing PAC gates (v0.1.3+) before blaming scan logic alone — see `docs/CRASH_20261010.md`.
 - **Wrong symbol / OTA kernel**: KMI-mismatched `livefix.ko` fails `insmod` (vermagic); wrong symbol name fails apply with log line.
 
 ## Userspace control

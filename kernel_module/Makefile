@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 obj-m := livefix.o
 livefix-y := livefix_mod.o livefix_patch.o livefix_misc.o livefix_socket.o \
-	livefix_gate.o livefix_gate_ret0.o
+	livefix_gate.o livefix_gate_ret0.o livefix_gates_pool.o
 
 ccflags-y += -I$(src)/include
 

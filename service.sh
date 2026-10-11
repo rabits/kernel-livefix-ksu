@@ -14,6 +14,7 @@ if ! wait_for_kernelsu; then
 fi
 
 ensure_kptr
+sh "$MODDIR/scripts/livefix-ctl.sh" sync-session
 sh "$MODDIR/scripts/livefix-ctl.sh" bootstrap-autostart
 sh "$MODDIR/scripts/livefix-ctl.sh" apply-all
 log "service.sh done"

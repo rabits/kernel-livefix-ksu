@@ -8,14 +8,16 @@
 	.global livefix_gate_ret0
 	.type livefix_gate_ret0, %function
 livefix_gate_ret0:
-	.inst 0xd503201f	/* hint slot 0 (paciasp/bti/nop from target) */
+	.inst 0xd503201f	/* legacy slot; per-hook gates use livefix_gates_pool */
 	mov	w0, #0
+	autiasp
 	ret
 	.size livefix_gate_ret0, . - livefix_gate_ret0
 
 	.global livefix_gate_ret
 	.type livefix_gate_ret, %function
 livefix_gate_ret:
-	.inst 0xd503201f	/* hint slot 0 */
+	.inst 0xd503201f	/* legacy slot */
+	autiasp
 	ret
 	.size livefix_gate_ret, . - livefix_gate_ret

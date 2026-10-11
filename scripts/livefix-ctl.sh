@@ -9,9 +9,10 @@ MODDIR="${MODDIR:-${0%/*}/..}"
 AUTOSTART="$STATE_DIR/autostart.conf"
 BROKEN="$STATE_DIR/broken.list"
 APPLIED="$STATE_DIR/applied.list"
+SESSION_BOOT="$STATE_DIR/session.boot_id"
 
 usage() {
-  echo "Usage: $0 {detect|status|bootstrap-autostart|apply <id>|apply <id> --force|apply-all|clear-broken <id>}"
+  echo "Usage: $0 {detect|status|sync-session|load-engine|unload-engine|bootstrap-autostart|apply <id>|apply <id> --force|unapply <id>|apply-all|clear-broken <id>}"
   exit 1
 }
 
@@ -50,6 +51,42 @@ is_broken() {
 
 is_applied() {
   [ -f "$APPLIED" ] && grep -qx "$1" "$APPLIED"
+}
+
+sync_boot_session() {
+  local cur
+  cur="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\n')"
+  [ -n "$cur" ] || return 0
+  if [ "$(cat "$SESSION_BOOT" 2>/dev/null | tr -d '\n')" != "$cur" ]; then
+    rm -f "$APPLIED"
+    echo "$cur" >"$SESSION_BOOT"
+    log "new boot $cur — cleared applied.list (hooks do not survive reboot)"
+  fi
+}
+
+engine_loaded() {
+  lsmod 2>/dev/null | grep -q '^livefix '
+}
+
+engine_patch_count() {
+  local n
+  if ! engine_loaded; then
+    echo 0
+    return
+  fi
+  kmi_paths 2>/dev/null || true
+  n="$([ -x "${CLI:-}" ] && "$CLI" status 2>/dev/null | sed -n 's/^patches=//p')"
+  echo "${n:-0}"
+}
+
+mark_unapplied() {
+  local id="$1"
+  [ -f "$APPLIED" ] || return 0
+  grep -vx "$id" "$APPLIED" >"$APPLIED.tmp" 2>/dev/null || true
+  mv "$APPLIED.tmp" "$APPLIED"
+  if [ -f "$APPLIED" ] && [ ! -s "$APPLIED" ]; then
+    rm -f "$APPLIED"
+  fi
 }
 
 mark_broken() {
@@ -133,22 +170,42 @@ ensure_engine() {
   kmi_paths || { log_err "unknown kernel profile"; return 1; }
   [ -f "$KO" ] || { log_err "missing $KO"; return 1; }
   [ -x "$CLI" ] || { log_err "missing $CLI"; return 1; }
-  if ! lsmod 2>/dev/null | grep -q '^livefix '; then
+  if ! engine_loaded; then
     log "insmod $KO"
-    insmod "$KO"
+    insmod "$KO" || return 1
   fi
+}
+
+cmd_load_engine() {
+  sync_boot_session
+  ensure_kptr
+  ensure_engine
+}
+
+cmd_unload_engine() {
+  if engine_loaded; then
+    log "rmmod livefix (persist hooks stay in kernel text until reboot)"
+    rmmod livefix 2>/dev/null || return 1
+  fi
+  rm -f "$APPLIED"
+  log "cleared applied.list — re-apply patches after load-engine"
 }
 
 cmd_apply() {
   local id="$1" force="${2:-0}" patch
   [ -n "$id" ] || usage
+  sync_boot_session
   if [ "$force" != "1" ] && is_broken "$id"; then
     log_err "$id broken — use: $0 apply $id --force"
     return 1
   fi
   if [ "$force" != "1" ] && is_applied "$id"; then
-    log "apply: $id already applied (use --force to retry)"
-    return 0
+    if engine_loaded && [ "$(engine_patch_count)" != "0" ]; then
+      log "apply: $id already applied (use --force to retry)"
+      return 0
+    fi
+    log "apply: $id marked applied but engine empty — re-applying"
+    mark_unapplied "$id"
   fi
   ensure_engine || return 1
   patch="$PATCHDIR/${id}.lfpatch"
@@ -169,7 +226,9 @@ cmd_apply() {
 
 cmd_apply_all() {
   local patch id
+  sync_boot_session
   kmi_paths || return 1
+  ensure_kptr
   cmd_bootstrap_autostart || true
   for patch in "$PATCHDIR"/*.lfpatch; do
     [ -f "$patch" ] || continue
@@ -184,9 +243,13 @@ cmd_apply_all() {
 }
 
 cmd_status() {
+  sync_boot_session
   kmi_paths 2>/dev/null || true
+  echo "boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+  echo "session_boot=$(cat "$SESSION_BOOT" 2>/dev/null)"
   echo "profile=${PROFILE:-unknown}"
-  echo "livefix_loaded=$(lsmod 2>/dev/null | grep -c '^livefix ' || echo 0)"
+  echo "livefix_loaded=$(engine_loaded && echo 1 || echo 0)"
+  echo "engine_patches=$(engine_patch_count)"
   echo "--- autostart ($AUTOSTART) ---"
   cat "$AUTOSTART" 2>/dev/null || true
   echo "--- broken ---"
@@ -206,7 +269,11 @@ cmd_status() {
 case "${1:-}" in
   detect) detect_kmi_profile ;;
   status) cmd_status ;;
+  sync-session) sync_boot_session ;;
+  load-engine) cmd_load_engine ;;
+  unload-engine) cmd_unload_engine ;;
   bootstrap-autostart) cmd_bootstrap_autostart ;;
+  unapply) mark_unapplied "$2"; log "unapplied $2 (kernel hooks remain until reboot)" ;;
   apply)
     if [ "${3:-}" = "--force" ]; then
       clear_broken "$2"

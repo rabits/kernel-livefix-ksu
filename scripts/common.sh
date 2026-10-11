@@ -11,7 +11,7 @@ log() { echo "[$(date '+%F %T')] $*"; }
 log_err() { log "ERROR: $*"; }
 
 wait_for_kernelsu() {
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 180); do
     if [ -d /data/adb/ksu ] || [ -c /dev/kernelsu ]; then
       return 0
     fi
