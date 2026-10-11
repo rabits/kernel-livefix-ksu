@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 VERSION="$(grep '^version=' "$ROOT/module.prop" | cut -d= -f2)"
 STAMP="$(date -u +%Y%m%d%H%M)"
-ZIP_NAME="${1:-kernel-livefix_${VERSION}-${STAMP}.zip}"
+ZIP_NAME="${1:-kernel-livefix-ksu_${VERSION}-${STAMP}.zip}"
 STAGE="$ROOT/.zip-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/prebuilt"

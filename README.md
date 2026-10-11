@@ -15,7 +15,8 @@ it could also replace functions logic as well.
 ## Build zip
 
 ```bash
-cd kernelsu-modules/kernel-livefix
+git clone https://github.com/rabits/kernel-livefix-ksu
+cd kernel-livefix-ksu
 
 # All KMI profiles:
 ./build.sh
