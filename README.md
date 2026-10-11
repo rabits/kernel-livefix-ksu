@@ -1,10 +1,16 @@
 # Kernel Livefix (KernelSU module)
 
-Kernel live patch engine to modify kernel functionality right on the fly.
+Live patch engine to modify kernel functionality on the fly.
 
 Installs **`livefix.ko`** module, which you can `rmmod` while hooks with `persist=1` stay in kernel text until reboot.
 
 ![Screenshot WebUI](docs/screenshot.jpg)
+
+## Description
+
+The project was prepared to be able to fix issues in kernel and patch backdoors and unwanted
+functionality in runtime. So far it's usable to disable some functions by returning from them, but
+it could also replace functions logic as well.
 
 ## Build zip
 
